@@ -162,8 +162,13 @@ function __pb_1_app_closeModal() {
   document.body.style.overflow = '';
   setTimeout(() => modalRoot.innerHTML = '', 220);
 }
-modalRoot.addEventListener('click', e => { if (e.target === modalRoot || e.target.closest('[data-close]')) closeModal(); });
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+modalRoot.addEventListener('click', e => {
+  if (e.target.closest('[data-close]')) { closeModal(); return; }
+  if (e.target === modalRoot && modalRoot.dataset.staticBackdrop !== 'true' && state.session?.role !== 'admin') closeModal();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && modalRoot.dataset.staticBackdrop !== 'true' && state.session?.role !== 'admin') closeModal();
+});
 
 function __pb_1_app_setSession(session) {
   state.session = session;
@@ -1259,7 +1264,7 @@ db.products.forEach(p=>{if(!Array.isArray(p.images)||!p.images.length)p.images=[
 save('products');
 
 // Update content inside an open modal instead of recreating and reanimating the modal shell.
-function __pb_5_interactions_openModal(content,wide=false){const current=$('.modal',modalRoot);if(modalRoot.classList.contains('open')&&current){current.className=`modal ${wide?'wide':''}`;current.innerHTML=content;current.scrollTop=0;current.classList.add('modal-content-swap');requestAnimationFrame(()=>requestAnimationFrame(()=>current.classList.remove('modal-content-swap')));}else{modalRoot.innerHTML=`<div class="modal ${wide?'wide':''}" role="dialog" aria-modal="true">${content}</div>`;modalRoot.classList.add('open');modalRoot.setAttribute('aria-hidden','false');document.body.style.overflow='hidden';} }
+function __pb_5_interactions_openModal(content,wide=false){const staticBackdrop=!!window.pbStaticModalNext||state.session?.role==='admin';window.pbStaticModalNext=false;modalRoot.dataset.staticBackdrop=staticBackdrop?'true':'false';const current=$('.modal',modalRoot);if(modalRoot.classList.contains('open')&&current){current.className=`modal ${wide?'wide':''}`;current.innerHTML=content;current.scrollTop=0;current.classList.add('modal-content-swap');requestAnimationFrame(()=>requestAnimationFrame(()=>current.classList.remove('modal-content-swap')));}else{modalRoot.innerHTML=`<div class="modal ${wide?'wide':''}" role="dialog" aria-modal="true">${content}</div>`;modalRoot.classList.add('open');modalRoot.setAttribute('aria-hidden','false');document.body.style.overflow='hidden';} }
 
 const renderHomeBeforeCarousel=renderHome;
 renderHome=function(){renderHomeBeforeCarousel();setupHeroCarousel();};
@@ -1821,6 +1826,9 @@ auditProductImageData();
   const statusCopy = value => ({ pending:'Menunggu', pending_whatsapp:'Menunggu konfirmasi', revision:'Perlu perbaikan', approved:'Disetujui', rejected:'Ditolak', suspended:'Ditangguhkan', wa:'Menunggu konfirmasi', confirmed:'Dikonfirmasi', completed:'Selesai', cancelled:'Dibatalkan' }[value] || value || '—');
   const appRef = id => `PB-${String(id || '').slice(0, 8).toUpperCase()}`;
   let authVersion = 0;
+  let authEventVersion = 0;
+  let authSyncTask = null;
+  let authSyncKey = null;
   let currentProfile = null;
   let currentAuthUser = null;
   let categoryPromise = null;
@@ -1969,7 +1977,19 @@ auditProductImageData();
       if ($('#roleButton')) $('#roleButton').textContent = 'Masuk';
     }
   }
-  async function syncAuthSession(authSession, options = {}) {
+  function syncAuthSession(authSession, options = {}) {
+    const userId = authSession?.user?.id || null;
+    const key = userId || '__signed_out__';
+    if (authSyncTask && authSyncKey === key) return authSyncTask;
+    authSyncKey = key;
+    const task = syncAuthSessionInternal(authSession, options);
+    const sharedTask = task.finally(() => {
+      if (authSyncTask === sharedTask) { authSyncTask = null; authSyncKey = null; }
+    });
+    authSyncTask = sharedTask;
+    return sharedTask;
+  }
+  async function syncAuthSessionInternal(authSession, options = {}) {
     const version = ++authVersion;
     const user = authSession?.user || null;
     if (!user) {
@@ -2057,13 +2077,17 @@ auditProductImageData();
     };
   }
   sb.auth.onAuthStateChange((event, authSession) => {
+    authEventVersion++;
     setTimeout(() => {
       syncAuthSession(authSession).catch(error => console.error('Auth refresh failed:', error));
       if(event==='PASSWORD_RECOVERY') setTimeout(showPasswordRecovery,100);
     }, 0);
   });
+  const initialAuthEventVersion = authEventVersion;
   window.pbAuthReady = sb.auth.getSession().then(({ data, error }) => {
     if (error) console.error('Supabase Auth session could not be restored:', error);
+    // A newer auth event (for example, a just-completed login) supersedes this startup snapshot.
+    if (initialAuthEventVersion !== authEventVersion) return state.session || null;
     return syncAuthSession(data?.session || null);
   }).catch(error => { console.error('Supabase Auth initialization failed:', error); return null; });
 
@@ -2076,6 +2100,7 @@ auditProductImageData();
     const registering = mode === 'register';
     const heading = context === 'admin' ? 'Masuk admin desa' : context === 'seller' ? 'Portal penjual' : 'Akun pembeli';
     const tabs = context === 'admin' ? '' : `<div class="auth-tabs"><button class="${!registering?'active':''}" data-auth-mode="login">Masuk</button><button class="${registering?'active':''}" data-auth-mode="register">Daftar</button></div>`;
+    if (mode === 'login') window.pbStaticModalNext = true;
     openModal(`<div class="modal-head auth-title"><div><p class="eyebrow">${esc(heading)}</p><h2>${registering?'Buat akun dengan email':'Masuk dengan email'}</h2><p>${registering?'Email dan kata sandi dipakai untuk login. WhatsApp hanya untuk kontak transaksi.':'Gunakan email dan kata sandi akun Supabase Anda.'}</p></div><button class="icon-btn" data-close>${icon('x')}</button></div><div class="modal-body">${tabs}${registering ? `<form id="remoteSignup" class="auth-form"><div class="field"><label>Nama lengkap</label><input required name="name" autocomplete="name" maxlength="120" value="${esc(currentProfile?.display_name || '')}"></div><div class="field"><label>Email</label><input required type="email" name="email" autocomplete="email" maxlength="254"></div><div class="field"><label>Kata sandi</label><input required type="password" name="password" autocomplete="new-password" minlength="8"></div><div class="field"><label>Ulangi kata sandi</label><input required type="password" name="confirm" autocomplete="new-password" minlength="8"></div><button class="btn btn-dark btn-block">Buat akun</button></form><p class="form-legal">Jika konfirmasi email aktif, buka tautan verifikasi yang dikirim ke email sebelum masuk.</p>` : `<form id="remoteLogin" class="auth-form"><div class="field"><label>Email</label><input required type="email" name="email" autocomplete="email" maxlength="254"></div><div class="field"><label>Kata sandi</label><input required type="password" name="password" autocomplete="current-password"></div><button class="btn btn-dark btn-block">Masuk</button><button type="button" class="text-btn" id="forgotPassword">Lupa kata sandi?</button></form>`}</div>`, true);
     $$('[data-auth-mode]').forEach(button => button.onclick = () => authModal(button.dataset.authMode, context));
     $('#remoteLogin')?.addEventListener('submit', async event => {
@@ -2084,7 +2109,15 @@ auditProductImageData();
       const { data: result, error } = await sb.auth.signInWithPassword({ email:data.email.trim().toLowerCase(), password:data.password });
       button.disabled = false; button.textContent = 'Masuk';
       if (error) return toast('Email atau kata sandi salah, atau email belum dikonfirmasi.');
-      const session = await syncAuthSession(result.session, { showError:true });
+      let session = await syncAuthSession(result.session, { showError:true });
+      if (!session) {
+        // If a stale startup/auth event raced this login, retry with Supabase's current session.
+        const { data: latest, error: latestError } = await sb.auth.getSession();
+        if (latestError) console.error('Could not confirm the current login session:', latestError);
+        if (latest?.session?.user?.id === result.session?.user?.id) {
+          session = await syncAuthSession(latest.session, { showError:true });
+        }
+      }
       if (!session) return;
       if (context === 'admin' && session.role !== 'admin') {
         await sb.auth.signOut();
